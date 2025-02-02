@@ -2,18 +2,18 @@
 	"logo": "logo.png",
 	"main": "index.html",
 	"preload": "preload.js",
-	"name": "your plugin ID",
+	"name": "ziuzgkjl",
 	"version": "1.0.0",
-	"pluginName": "template",
-	"description": "plugin template",
-	"author": "QC2168",
-	"homepage": "https://github.com/QC2168",
+	"pluginName": "图片记录",
+	"description": "将重要的图片记录下来，随时查看",
+	"author": "nickear",
+	"homepage": "https://github.com/nickear",
 	"features": [
 		{
-			"code": "template",
-			"explain": "插件模板主界面",
+			"code": "imageRecordAndView",
+			"explain": "图片记录",
 			"cmds": [
-				"template"
+				"图片记录"
 			]
 		}
 	]

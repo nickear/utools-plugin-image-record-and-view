@@ -5,8 +5,8 @@ import pkg from './package.json'
 import electron from 'vite-plugin-electron'
 import { rmSync } from 'node:fs'
 import { notBundle } from 'vite-plugin-electron/plugin'
-
-
+import path from "path";
+import {createSvgIconsPlugin} from 'vite-plugin-svg-icons'
 
 // https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {
@@ -18,7 +18,18 @@ export default defineConfig(({ command, mode }) => {
   const sourcemap = isServe || !!process.env.VSCODE_DEBUG
   return {
     base: './',
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      }
+    },
     plugins: [vue(),
+      createSvgIconsPlugin({
+        // 指定需要缓存的图标文件夹
+        iconDirs: [path.resolve(process.cwd(), 'src/assets')],
+        // 指定symbolId格式
+        symbolId: 'icon-[dir]-[name]',
+      }),
     utools({
       entry: [
         { entry: 'utools/preload.ts' }

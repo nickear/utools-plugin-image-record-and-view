@@ -19,7 +19,11 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "types": ["node", "utools-api-types"]
+    "types": ["node", "utools-api-types"],
+
+    "paths": {
+      "@/*": ["./src/*"],
+    }
   },
   "include": [
     "src/**/*.ts",
