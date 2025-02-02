@@ -1,14 +1,18 @@
-# utools-plugin-simple-note
+# utools-plugin-image-record-and-view
 
-简记（simple note)，一个utools笔记插件，界面仿照官方插件【Markdown笔记】，但不支持markdown，而是富文本类型的笔记。
+【图片记录】，一个utools插件。
 
-简记意为简单地记录，你可以用它来记录一些零散细碎的东西，它和你的主力笔记软件并不冲突，前者针对"简单"，后者针对"复杂、系统性"。
+用于将一些重要的图片记录下来，方便随时查看。
 
-笔记存放在你指定的文件夹下。每次新指定文件夹，需手动将旧文件夹中的笔记迁移至新文件夹中。
+支持的图片格式：png、jpg/jpeg、gif、svg、ico、bmp、webp。
+
+图片存储在本地。
 
 界面展示：
 
-![1](https://raw.githubusercontent.com/nickear/simple-note/main/image.png)
+![1](https://raw.githubusercontent.com/nickear/utools-plugin-image-record-and-view/main/image.png)
+
+![2](https://raw.githubusercontent.com/nickear/utools-plugin-image-record-and-view/main/image2.png)
 
 
 
