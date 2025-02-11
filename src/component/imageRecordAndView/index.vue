@@ -470,6 +470,7 @@ const handleImageRemoveBtnClick = (image: string, index: number) => {
         '提示',
         {
             confirmButtonText: '确定删除',
+            confirmButtonClass: 'el-button--danger',
             cancelButtonText: '取消',
             type: 'warning',
         } as ElMessageBoxOptions
@@ -510,6 +511,7 @@ const handleImageBatchRemoveBtnClick = () => {
             '提示',
             {
                 confirmButtonText: '确定删除',
+                confirmButtonClass: 'el-button--danger',
                 cancelButtonText: '取消',
                 type: 'warning',
             } as ElMessageBoxOptions
@@ -638,6 +640,7 @@ const removeGroup = (group: string) => {
         '提示',
         {
             confirmButtonText: '确定删除',
+            confirmButtonClass: 'el-button--danger',
             cancelButtonText: '取消',
             type: 'warning',
         } as ElMessageBoxOptions
@@ -861,6 +864,15 @@ const saveImageProfile = () => {
     })
 }
 
+const handleDrop = (event: DragEvent) => {
+  if (event.dataTransfer?.files?.length) {
+    const images = [...event.dataTransfer.files].filter((file: File) => supportImageMIME.includes(file.type))
+    if (images && images.length) {
+      saveImageHandler((path) => window.p.copyImage(path, openedGroup.value), images.map((image: File) => image.path))
+    }
+  }
+}
+
 onMounted(() => {
     const features = utools.getFeatures()
     featureCodes.value = features.map((feature: any) => feature.code)
@@ -919,12 +931,19 @@ onMounted(() => {
                 <div class="header-btn circle" title="新建图片分组" @click="handleGroupAddBtnClick">
                     <SvgIcon name="folder-add"></SvgIcon>
                 </div>
-                <div class="header-btn circle" title="设置图片文件夹" @click="emit('setting')">
-                    <SvgIcon name="setting"></SvgIcon>
-                </div>
-                <div class="header-btn circle" title="打开图片文件夹" @click="handleFolderOpenBtnClick">
+
+                <el-dropdown>
+                  <div class="header-btn circle">
                     <SvgIcon name="folder-open"></SvgIcon>
-                </div>
+                  </div>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item @click="emit('setting')">设置图片文件夹</el-dropdown-item>
+                      <el-dropdown-item @click="handleFolderOpenBtnClick">打开图片文件夹</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+
                 <div class="header-btn circle" title="设置布局" @click="handleGlobalLayoutBtnClick">
                     <SvgIcon name="layout"></SvgIcon>
                 </div>
@@ -945,7 +964,9 @@ onMounted(() => {
                                       v-model="groupName"
                                       placeholder="输入分组名称"
                                       @input="handleGroupInput"
-                                      @blur="tipsVisible=false"></el-input>
+                                      @blur="tipsVisible=false"
+                                      @keyup.enter="handleGroupDialogConfirmBtnClick"
+                            ></el-input>
                         </template>
                     </el-popover>
                     <template #footer>
@@ -986,6 +1007,14 @@ onMounted(() => {
                         <div class="title">{{ openedGroup }}</div>
                     </div>
                     <div class="right-header-right">
+                        <div title="「拖拽上传」拖拽图片到下方上传"
+                             style="display: flex;
+                             justify-content: center;
+                             align-items: center;
+                             width: 35px;
+                             height: 35px;">
+                          <SvgIcon name="drag"></SvgIcon>
+                        </div>
                         <div class="header-btn square" title="「本地上传」从本地选择一张或多张图片上传"
                              @click="handleUploadBtnClick">
                             <SvgIcon name="upload"></SvgIcon>
@@ -1011,7 +1040,7 @@ onMounted(() => {
                         </div>
                     </div>
                 </div>
-                <div v-if="imageList.length" class="image-list">
+                <div v-if="imageList.length" class="image-list" @drop="handleDrop" @dragover.prevent>
                     <div class="image-item"
                          :style="{width: `calc((100% - ${(imageNumPerRow-1)*20}px) / ${imageNumPerRow})`}"
                          v-for="(image,index) in imageList" :key="image">
@@ -1071,8 +1100,9 @@ onMounted(() => {
                         </div>
                     </div>
                 </div>
-                <el-empty v-else description="空空如也">
+                <el-empty v-else description="空空如也" @drop="handleDrop" @dragover.prevent>
                     <div style="text-align: left; color: #909399; margin-bottom: 15px; line-height: 1.5">
+                        <p>「拖拽上传」拖拽图片到此处上传</p>
                         <p>「本地上传」从本地选择一张或多张图片上传</p>
                         <p>「截图上传」截取一张图片上传</p>
                         <p>「剪贴板上传」将最近一次复制的一张或多张图片上传</p>
@@ -1344,7 +1374,7 @@ onMounted(() => {
 }
 
 .right-header-left {
-    width: calc(100% - 300px);
+    width: calc(100% - 335px);
     display: flex;
     align-items: center;
 }
@@ -1358,7 +1388,7 @@ onMounted(() => {
 }
 
 .right-header-right {
-    width: 300px;
+    width: 335px;
     display: flex;
     justify-content: flex-end;
     align-items: center;
