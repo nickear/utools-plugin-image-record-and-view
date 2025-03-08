@@ -597,7 +597,6 @@ const showImageContextMenu = (event: MouseEvent, image: string, index: number, f
             show: imageNumPerRow.value > 1
         }
     ]
-    debugger;
     if (filter) {
         menuList.value = imageMenuList.filter(({show}) => !!show)
     } else {
@@ -1226,8 +1225,8 @@ onMounted(() => {
                 width="60%"
                 :z-index="99"
         >
-            <el-button style="margin: 0 8px 8px 0" color="#626aef" @click="handleImageBatchEditBtnClick">修改图片名称
-            </el-button>
+            <!-- <el-button style="margin: 0 8px 8px 0" color="#626aef" @click="handleImageBatchEditBtnClick">修改图片名称
+            </el-button> -->
             <el-button style="margin: 0 8px 8px 0" color="#626aef" @click="handleKeywordBatchSetBtnClick">设为utools关键字
             </el-button>
             <el-button style="margin: 0 8px 8px 0" color="#626aef" @click="handleKeywordBatchRemoveBtnClick">移除utools关键字
