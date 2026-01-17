@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import {ref, watchEffect, onMounted, computed} from 'vue'
+import {ref, watchEffect, onMounted, onUnmounted, computed, nextTick} from 'vue'
 import {ElMessage, ElMessageBox} from "element-plus";
 import ContextMenu from '@/component/contextMenu/index.vue'
 import draggable from 'vuedraggable'
 import {ElMessageBoxOptions} from "element-plus/es/components/message-box/src/message-box.type";
 import SvgIcon from '@/component/svgIcon/index.vue'
+import { RecycleScroller } from 'vue-virtual-scroller'
+import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 
 const props = defineProps(['pluginCode'])
 const emit = defineEmits(['setting'])
@@ -41,10 +43,13 @@ const groupLayoutDialogVisible = ref<boolean>(false)
 const groupImageNumPerRow = ref<number>(0)
 const groupImageNumPerRowTemp = ref<number>(0)
 const selectedImages = ref<string[]>([])
-const batchEditImages = ref<{name: string, extension: string, tipsVisible: boolean}[]>([])
-const imageLoadList: boolean[] = [] // 图片加载状态列表,true表示图片已加载完成,false表示图片未加载
-let scrollToImageIndex: number = -1 // 要滚动到的图片的索引
+const batchEditImages = ref<{id: string, originalName: string, name: string, extension: string, tipsVisible: boolean}[]>([])
 const imageBatchEditDialogVisible = ref<boolean>(false)
+const isUploading = ref<boolean>(false) // 防止重复上传
+const allSelected = ref<boolean>(false) // 全选状态
+
+// 懒加载相关
+let imageObserver: IntersectionObserver | null = null // 图片懒加载观察器
 
 const supportImageMIME = ['image/png', 'image/jpeg', 'image/gif', 'image/svg+xml', 'image/bmp', 'image/webp', 'image/x-icon', 'image/vnd.microsoft.icon']
 
@@ -52,51 +57,169 @@ const imageNumPerRow = computed(() => {
     return groupImageNumPerRow.value || globalImageNumPerRow.value || 1
 })
 
+// 过滤后的图片列表（支持搜索）
+const filteredImageList = computed(() => {
+    if (!search.value || !search.value.trim()) {
+        return imageList.value
+    }
+    const searchText = search.value.trim().toLowerCase()
+    return imageList.value.filter((image: string) => 
+        image.toLowerCase().includes(searchText)
+    )
+})
+
+// 虚拟列表使用的数据（需要对象格式）
+const virtualListItems = computed(() => {
+    return filteredImageList.value.map((image: string) => ({
+        id: image,
+        name: image
+    }))
+})
+
+// 监听搜索结果变化，重新观察图片元素
+watchEffect(() => {
+    // 访问 filteredImageList 以建立依赖
+    if (filteredImageList.value.length > 0) {
+        // 搜索结果变化后，重新观察图片
+        observeImages()
+    }
+})
+
+// 监听搜索条件变化，更新全选状态
+watchEffect(() => {
+    // 当搜索条件改变时，检查并更新全选状态
+    if (filteredImageList.value.length > 0) {
+        updateAllSelectedState()
+    } else {
+        allSelected.value = false
+    }
+})
+
+// 初始化图片懒加载观察器
+const initImageObserver = () => {
+    if (imageObserver) return
+    
+    imageObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                const img = entry.target as HTMLImageElement
+                const src = img.dataset.src
+                
+                // 如果有 data-src 且还没加载，则加载图片
+                if (src && !img.src.endsWith(src)) {
+                    img.src = src
+                    // 加载后停止观察这个元素
+                    imageObserver!.unobserve(img)
+                }
+            }
+        })
+    }, {
+        root: null,  // 使用视口作为根元素
+        rootMargin: '200px',  // 提前200px开始加载
+        threshold: 0.01  // 元素1%可见时触发
+    })
+}
+
+// 观察所有懒加载图片
+const observeImages = () => {
+    if (!imageObserver) {
+        initImageObserver()
+    }
+    
+    // 等待 DOM 更新后观察新元素
+    nextTick(() => {
+        const images = document.querySelectorAll('.lazy-image')
+        images.forEach(img => {
+            imageObserver!.observe(img)
+        })
+    })
+}
+
 const handleGroupDialogConfirmBtnClick = () => {
     groupName.value = groupName.value.trim()
-    let message = ''
-    if (!groupName.value) {
-        message = '分组名称不能为空'
-    } else if (groupName.value.length > 100) {
-        message = '修改失败，分组名称不能超过100个字符'
-    } else {
-        const index = groupList.value.indexOf(groupName.value)
-        if (index !== -1 && (isGroupAdd.value || index !== groupIndex.value)) {
-            message = '分组名称重复'
-        }
-    }
-    if (message) {
+
+    // 使用后端验证函数检查分组名称合法性
+    const validation = window.p.validateFileName(groupName.value)
+    if (!validation.valid) {
         ElMessage.warning({
-            message,
+            message: `操作失败，${validation.error}`,
             showClose: true
         })
         return
     }
+
+    // 检查名称是否重复（排除当前分组自身）
+    const existingIndex = groupList.value.indexOf(groupName.value)
+    if (existingIndex !== -1 && (isGroupAdd.value || existingIndex !== groupIndex.value)) {
+        ElMessage.warning({
+            message: '操作失败，分组名称重复',
+            showClose: true
+        })
+        return
+    }
+
     if (isGroupAdd.value) {
-        window.p.createNewGroup(groupName.value)
+        // 新建分组
+        const result = window.p.createNewGroup(groupName.value)
+        if (!result.success) {
+            ElMessage.warning({
+                message: `创建失败，${result.error}`,
+                showClose: true
+            })
+            return
+        }
         groupList.value.push(groupName.value)
         handleGroupChange(groupName.value, true)
+        ElMessage.success({
+            message: '创建成功',
+            showClose: true
+        })
     } else {
-        window.p.renameGroup(groupList.value[groupIndex.value], groupName.value)
+        // 重命名分组
+        const originalGroup = groupList.value[groupIndex.value]
+
+        // 如果名称没有变化，直接关闭对话框
+        if (originalGroup === groupName.value) {
+            groupDialogVisible.value = false
+            return
+        }
+
+        const result = window.p.renameGroup(originalGroup, groupName.value)
+        if (!result.success) {
+            ElMessage.warning({
+                message: `重命名失败，${result.error}`,
+                showClose: true
+            })
+            return
+        }
+
+        // 更新关键字
         featureCodes.value.forEach((featureCode: string, index: number) => {
-            if (featureCode.startsWith(`${groupList.value[groupIndex.value]}/`)) {
+            if (featureCode.startsWith(`${originalGroup}/`)) {
                 utools.removeFeature(featureCode)
                 const image = featureCode.slice(featureCode.indexOf('/') + 1)
                 const newFeatureCode = `${groupName.value}/${image}`
                 utools.setFeature({
-                    "code": newFeatureCode,
-                    "explain": image,
-                    "platform": ["win32", "darwin", "linux"],
-                    "cmds": [image]
+                    code: newFeatureCode,
+                    explain: image,
+                    platform: ['win32', 'darwin', 'linux'],
+                    cmds: [image]
                 })
                 featureCodes.value[index] = newFeatureCode
             }
         })
-        if (openedGroup.value === groupList.value[groupIndex.value]) {
+
+        // 更新当前打开的分组
+        if (openedGroup.value === originalGroup) {
             openedGroup.value = groupName.value
         }
+
         groupList.value[groupIndex.value] = groupName.value
         saveGroupProfile()
+        ElMessage.success({
+            message: '重命名成功',
+            showClose: true
+        })
     }
     groupDialogVisible.value = false
 }
@@ -104,6 +227,11 @@ const handleGroupDialogConfirmBtnClick = () => {
 const handleGroupChange = async (group: string, isNewGroup?: boolean) => {
     imageList.value = []
     openedGroup.value = group
+    
+    // 清空选中状态
+    selectedImages.value = []
+    allSelected.value = false
+    
     if (isNewGroup) {
         groupImageNumPerRow.value = 0
     } else {
@@ -112,59 +240,107 @@ const handleGroupChange = async (group: string, isNewGroup?: boolean) => {
         loading.value = false
         imageList.value = list
         groupImageNumPerRow.value = profile.imageNumPerRow || 0
+        
+        // 观察新的图片元素（懒加载）
+        observeImages()
     }
     saveGroupProfile()
 }
 
 const saveImageHandler = async (saveImageFn: (listItem?: any) => Promise<string>, list?: any[]) => {
+    // 防止重复调用
+    if (isUploading.value) {
+        ElMessage.warning({
+            message: '正在上传中，请稍候',
+            showClose: true
+        })
+        return
+    }
+    
+    isUploading.value = true
     loading.value = true
-    if (list) {
-        let successCount = 0
-        for (let i = list.length - 1; i >= 0; i--) {
-            const image = await saveImageFn(list[i])
-            if (image) {
-                successCount++
-                imageList.value.unshift(image)
+    
+    try {
+        if (list) {
+            const CONCURRENT_LIMIT = 5  // 每批并发5个
+            const results: (string | null)[] = new Array(list.length).fill(null)
+            let successCount = 0
+            
+            // 倒序分批处理（保持原有逻辑）
+            for (let i = list.length - 1; i >= 0; i -= CONCURRENT_LIMIT) {
+                const start = Math.max(0, i - CONCURRENT_LIMIT + 1)
+                const end = i + 1
+                const batch = list.slice(start, end)
+                
+                // 并发上传这一批，但记录每个文件的原始索引
+                const batchPromises = batch.map((item, batchIdx) => 
+                    saveImageFn(item).then(result => ({
+                        originalIndex: start + batchIdx,
+                        result
+                    }))
+                )
+                
+                const batchResults = await Promise.allSettled(batchPromises)
+                
+                // 按原始索引存储结果
+                batchResults.forEach(promiseResult => {
+                    if (promiseResult.status === 'fulfilled' && promiseResult.value.result) {
+                        results[promiseResult.value.originalIndex] = promiseResult.value.result
+                        successCount++
+                    }
+                })
             }
-        }
-        loading.value = false
-        if (successCount === 0) {
-            ElMessage.warning({
-                message: '上传失败',
-                showClose: true
-            })
-            return
-        }
-        if (successCount === list.length) {
+            
+            // 一次性更新 UI（保持顺序：倒序插入）
+            const successImages = results.filter(r => r !== null).reverse()
+            imageList.value = [...successImages, ...imageList.value]
+            
+            loading.value = false
+            
+            if (successCount === 0) {
+                ElMessage.warning({
+                    message: '上传失败',
+                    showClose: true
+                })
+                return
+            }
+            if (successCount === list.length) {
+                ElMessage.success({
+                    message: '上传成功，若图片未显示，请等待其加载',
+                    showClose: true
+                })
+            } else {
+                ElMessage.info({
+                    message: `上传成功数量${successCount}，失败数量${list.length - successCount}张，若上传成功的图片未显示，请等待其加载`,
+                    showClose: true,
+                })
+            }
+        } else {
+            const image = await saveImageFn()
+            loading.value = false
+            if (!image) {
+                ElMessage.warning({
+                    message: '上传失败',
+                    showClose: true
+                })
+                return
+            }
+            imageList.value.unshift(image)
             ElMessage.success({
                 message: '上传成功，若图片未显示，请等待其加载',
                 showClose: true
             })
-        } else {
-            ElMessage.info({
-                message: `上传成功数量${successCount}，失败数量${list.length - successCount}张，若上传成功的图片未显示，请等待其加载`,
-                showClose: true,
-            })
         }
-    } else {
-        const image = await saveImageFn()
-        loading.value = false
-        if (!image) {
-            ElMessage.warning({
-                message: '上传失败',
-                showClose: true
-            })
-            return
-        }
-        imageList.value.unshift(image)
-        ElMessage.success({
-            message: '上传成功，若图片未显示，请等待其加载',
-            showClose: true
-        })
-    }
 
-    document.querySelector('.image-list')?.scrollTo(0, 0)
-    saveImageProfile()
+        document.querySelector('.image-list')?.scrollTo(0, 0)
+        saveImageProfile()
+        
+        // 观察新上传的图片（懒加载）
+        observeImages()
+    } finally {
+        loading.value = false
+        isUploading.value = false
+    }
 }
 
 const handleUploadBtnClick = () => {
@@ -200,7 +376,7 @@ const convertMIMEToExtension = (MIME: string) => {
 const handleClipboardBtnClick = () => {
     const copyFiles = utools.getCopyedFiles()
     if (copyFiles) {
-        // 如果复制的是图片文件
+        // 如果复制的是图片文件（可以多张）
         const supportImages = copyFiles.filter(({isFile, name}) => isFile && window.p.isSupportImage(name))
         if (supportImages.length === 0) {
             ElMessage.warning({
@@ -211,30 +387,46 @@ const handleClipboardBtnClick = () => {
             saveImageHandler(({path}) => window.p.copyImage(path, openedGroup.value), supportImages)
         }
     } else {
-        // 如果复制的是纯图片
+        // 如果复制的是纯图片（只能一张）
         navigator.clipboard.read().then(async (clipboards) => {
-            const list: { arrayBuffer: ArrayBuffer, extension: string }[] = []
-            for (const clipboard of clipboards) {
-                let imageType = clipboard.types.find(type => supportImageMIME.includes(type))
-                if (imageType) {
-                    const blob = await clipboard.getType(imageType)
-                    const arrayBuffer = await blob.arrayBuffer();
-                    list.push({
-                        arrayBuffer,
-                        extension: convertMIMEToExtension(imageType)
-                    })
-                }
+            // 剪贴板通常只有一个 ClipboardItem
+            if (clipboards.length === 0) {
+                ElMessage.warning({
+                    message: '上传失败，剪贴板中未读取到图片',
+                    showClose: true
+                })
+                return
             }
-            if (!list.length) {
+            
+            // 只处理第一个 ClipboardItem
+            const clipboard = clipboards[0]
+            const imageType = clipboard.types.find(type => supportImageMIME.includes(type))
+            
+            if (!imageType) {
                 ElMessage.warning({
                     message: '上传失败，剪贴板中未读取到图片，或图片格式不支持',
                     showClose: true
                 })
-            } else {
-                saveImageHandler(({
-                                      arrayBuffer,
-                                      extension
-                                  }) => window.p.savePureImage(openedGroup.value, arrayBuffer, extension), list)
+                return
+            }
+            
+            try {
+                const blob = await clipboard.getType(imageType)
+                const arrayBuffer = await blob.arrayBuffer()
+                
+                // 单张图片上传
+                saveImageHandler(
+                    () => window.p.savePureImage(
+                        openedGroup.value, 
+                        arrayBuffer, 
+                        convertMIMEToExtension(imageType)
+                    )
+                )
+            } catch (e) {
+                ElMessage.warning({
+                    message: '上传失败，请重新复制',
+                    showClose: true
+                })
             }
         }).catch(e => {
             ElMessage.warning({
@@ -242,12 +434,49 @@ const handleClipboardBtnClick = () => {
                 showClose: true
             })
         })
-
     }
 }
 
 const handleBatchBtnClick = () => {
     batchDialogVisible.value = true
+}
+
+// 虚拟列表选中逻辑
+const toggleImageSelection = (image: string) => {
+    const index = selectedImages.value.indexOf(image)
+    if (index > -1) {
+        selectedImages.value.splice(index, 1)
+    } else {
+        selectedImages.value.push(image)
+    }
+    updateAllSelectedState()
+}
+
+const isImageSelected = (image: string) => {
+    return selectedImages.value.includes(image)
+}
+
+const toggleAllSelection = () => {
+    if (allSelected.value) {
+        selectedImages.value = []
+        allSelected.value = false
+    } else {
+        selectedImages.value = [...filteredImageList.value]
+        allSelected.value = true
+    }
+}
+
+const updateAllSelectedState = () => {
+    if (filteredImageList.value.length === 0) {
+        allSelected.value = false
+        return
+    }
+    
+    // 检查 filteredImageList 中的所有图片是否都被选中
+    const allFilteredSelected = filteredImageList.value.every(image => 
+        selectedImages.value.includes(image)
+    )
+    allSelected.value = allFilteredSelected
 }
 
 const handleGroupLayoutBtnClick = () => {
@@ -361,7 +590,9 @@ const handleImageBatchEditBtnClick = () => {
             showClose: true
         })
     } else {
-        batchEditImages.value = selectedImages.value.map((image: string) => ({
+        batchEditImages.value = selectedImages.value.map((image: string, index: number) => ({
+            id: `${image}_${index}`, // 添加唯一 id
+            originalName: image, // 保存原始完整名称
             name: image.slice(0, image.lastIndexOf('.')),
             extension: image.slice(image.lastIndexOf('.')),
             tipsVisible: false
@@ -400,9 +631,31 @@ const handleImageFileCopyBtnClick = (image: string) => {
 }
 
 const handleImageFileBatchCopyBtnClick = () => {
-    batchOperateHandler(() => {
-        return utools.copyFile(selectedImages.value.map((image: string) => getImagePath(image)))
-    }, {allInOne: true})
+    if (selectedImages.value.length === 0) {
+        ElMessage.warning({
+            message: '未选中图片',
+            showClose: true
+        })
+        return
+    }
+
+    // 构建文件路径列表
+    const filePaths = selectedImages.value.map((image: string) => getImagePath(image))
+
+    // utools.copyFile 支持传入数组，一次性复制多个文件到剪贴板
+    const success = utools.copyFile(filePaths)
+
+    if (success) {
+        ElMessage.success({
+            message: '复制成功',
+            showClose: true
+        })
+    } else {
+        ElMessage.warning({
+            message: '复制失败',
+            showClose: true
+        })
+    }
 }
 
 const handleImagePasteBtnClick = (image: string) => {
@@ -417,42 +670,171 @@ const handleImageFilePasteBtnClick = (image: string) => {
 }
 
 const handleImageFileBatchPasteBtnClick = () => {
-    batchOperateHandler(() => {
-        return utools.hideMainWindowPasteFile(selectedImages.value.map((image: string) => getImagePath(image)))
-    }, {allInOne: true, showMessage: false})
+    if (selectedImages.value.length === 0) {
+        ElMessage.warning({
+            message: '未选中图片',
+            showClose: true
+        })
+        return
+    }
+
+    // 构建文件路径列表
+    const filePaths = selectedImages.value.map((image: string) => getImagePath(image))
+
+    // utools.hideMainWindowPasteFile 支持传入数组，一次性粘贴多个文件
+    utools.hideMainWindowPasteFile(filePaths)
 }
 
-const handleKeywordBatchSetBtnClick = () => {
-    batchOperateHandler((image: string) => {
-        const featureCode = `${openedGroup.value}/${image}`
-        if (!featureCodes.value.includes(featureCode)) {
-            if (utools.setFeature({
-                "code": featureCode,
-                "explain": image,
-                "platform": ["win32", "darwin", "linux"],
-                "cmds": [image]
-            })) {
-                featureCodes.value.push(featureCode)
-                return true
-            }
-            return false
-        }
-        return true
-    }, {allInOne: false})
-}
+const handleKeywordBatchSetBtnClick = async () => {
+    if (selectedImages.value.length === 0) {
+        ElMessage.warning({
+            message: '未选中图片',
+            showClose: true
+        })
+        return
+    }
 
-const handleKeywordBatchRemoveBtnClick = () => {
-    batchOperateHandler((image: string) => {
+    loading.value = true
+
+    // 收集需要设置的关键字
+    const toSet: string[] = []
+    let alreadySetCount = 0
+
+    for (const image of selectedImages.value) {
         const featureCode = `${openedGroup.value}/${image}`
         if (featureCodes.value.includes(featureCode)) {
-            if (utools.removeFeature(featureCode)) {
-                featureCodes.value = featureCodes.value.filter((_featureCode: string) => _featureCode !== featureCode)
-                return true
-            }
-            return false
+            alreadySetCount++
+        } else {
+            toSet.push(image)
         }
-        return true
-    }, {allInOne: false})
+    }
+
+    // 分批设置，避免阻塞主线程
+    const successCodes: string[] = []
+    const BATCH_SIZE = 50
+
+    for (let i = 0; i < toSet.length; i += BATCH_SIZE) {
+        const batch = toSet.slice(i, i + BATCH_SIZE)
+
+        for (const image of batch) {
+            const featureCode = `${openedGroup.value}/${image}`
+            if (
+                utools.setFeature({
+                    code: featureCode,
+                    explain: image,
+                    platform: ['win32', 'darwin', 'linux'],
+                    cmds: [image]
+                })
+            ) {
+                successCodes.push(featureCode)
+            }
+        }
+
+        // 让出主线程，避免卡顿
+        if (i + BATCH_SIZE < toSet.length) {
+            await new Promise(resolve => setTimeout(resolve, 0))
+        }
+    }
+
+    // 一次性更新响应式数据
+    if (successCodes.length > 0) {
+        featureCodes.value = [...featureCodes.value, ...successCodes]
+    }
+
+    loading.value = false
+
+    // 显示结果
+    const successCount = successCodes.length + alreadySetCount
+    const totalCount = selectedImages.value.length
+    if (successCount === totalCount) {
+        ElMessage.success({
+            message: '操作成功',
+            showClose: true
+        })
+    } else if (successCount === 0) {
+        ElMessage.warning({
+            message: '操作失败',
+            showClose: true
+        })
+    } else {
+        ElMessage.info({
+            message: `操作成功数量${successCount}，失败数量${totalCount - successCount}`,
+            showClose: true
+        })
+    }
+}
+
+const handleKeywordBatchRemoveBtnClick = async () => {
+    if (selectedImages.value.length === 0) {
+        ElMessage.warning({
+            message: '未选中图片',
+            showClose: true
+        })
+        return
+    }
+
+    loading.value = true
+
+    // 收集需要移除的关键字
+    const toRemove: string[] = []
+    let notSetCount = 0
+
+    for (const image of selectedImages.value) {
+        const featureCode = `${openedGroup.value}/${image}`
+        if (featureCodes.value.includes(featureCode)) {
+            toRemove.push(featureCode)
+        } else {
+            notSetCount++
+        }
+    }
+
+    // 分批移除，避免阻塞主线程
+    const removedCodes = new Set<string>()
+    const BATCH_SIZE = 50
+
+    for (let i = 0; i < toRemove.length; i += BATCH_SIZE) {
+        const batch = toRemove.slice(i, i + BATCH_SIZE)
+
+        for (const featureCode of batch) {
+            if (utools.removeFeature(featureCode)) {
+                removedCodes.add(featureCode)
+            }
+        }
+
+        // 让出主线程，避免卡顿
+        if (i + BATCH_SIZE < toRemove.length) {
+            await new Promise(resolve => setTimeout(resolve, 0))
+        }
+    }
+
+    // 一次性更新响应式数据
+    if (removedCodes.size > 0) {
+        featureCodes.value = featureCodes.value.filter(
+            code => !removedCodes.has(code)
+        )
+    }
+
+    loading.value = false
+
+    // 显示结果
+    const successCount = removedCodes.size + notSetCount
+    const totalCount = selectedImages.value.length
+    if (successCount === totalCount) {
+        ElMessage.success({
+            message: '操作成功',
+            showClose: true
+        })
+    } else if (successCount === 0) {
+        ElMessage.warning({
+            message: '操作失败',
+            showClose: true
+        })
+    } else {
+        ElMessage.info({
+            message: `操作成功数量${successCount}，失败数量${totalCount - successCount}`,
+            showClose: true
+        })
+    }
 }
 
 const handleImageFullscreenBtnClick = (image: string) => {
@@ -495,6 +877,14 @@ const handleImageRemoveBtnClick = (image: string, index: number) => {
                 removeKeyword(featureCode, image)
             }
             imageList.value.splice(index, 1)
+            
+            // 清理选中状态
+            const selectedIndex = selectedImages.value.indexOf(image)
+            if (selectedIndex > -1) {
+                selectedImages.value.splice(selectedIndex, 1)
+                updateAllSelectedState()
+            }
+            
             saveImageProfile()
         })
 }
@@ -505,35 +895,114 @@ const handleImageBatchRemoveBtnClick = () => {
             message: '未选中图片',
             showClose: true
         })
-    } else {
-        ElMessageBox.confirm(
-            `确定删除选中的所有图片？图片删除后将无法恢复！！！`,
-            '提示',
-            {
-                confirmButtonText: '确定删除',
-                confirmButtonClass: 'el-button--danger',
-                cancelButtonText: '取消',
-                type: 'warning',
-            } as ElMessageBoxOptions
-        )
-            .then(async () => {
-                await batchOperateHandler(async (image: string) => {
-                    const success = await window.p.removeImage(openedGroup.value, image)
-                    if (success) {
-                        const featureCode = `${openedGroup.value}/${image}`
-                        if (featureCodes.value.includes(featureCode)) {
-                            if (utools.removeFeature(featureCode)) {
-                                featureCodes.value = featureCodes.value.filter((_featureCode: string) => _featureCode !== featureCode)
-                            }
-                        }
-                        imageList.value.splice(imageList.value.indexOf(image), 1)
-                        return true
-                    }
-                    return false
-                }, {allInOne: false})
-                saveImageProfile()
-            })
+        return
     }
+
+    ElMessageBox.confirm(
+        `确定删除选中的 ${selectedImages.value.length} 张图片？图片删除后将无法恢复！！！`,
+        '提示',
+        {
+            confirmButtonText: '确定删除',
+            confirmButtonClass: 'el-button--danger',
+            cancelButtonText: '取消',
+            type: 'warning'
+        } as ElMessageBoxOptions
+    ).then(async () => {
+        loading.value = true
+
+        // 收集要删除的图片
+        const toDelete = [...selectedImages.value]
+        const deletedImages = new Set<string>()
+        const deletedFeatureCodes = new Set<string>()
+
+        // 分批删除文件，避免阻塞主线程
+        const BATCH_SIZE = 20 // 文件操作较重，每批少一些
+
+        for (let i = 0; i < toDelete.length; i += BATCH_SIZE) {
+            const batch = toDelete.slice(i, i + BATCH_SIZE)
+
+            // 并发删除这一批文件
+            const results = await Promise.allSettled(
+                batch.map(async image => {
+                    const success = await window.p.removeImage(
+                        openedGroup.value,
+                        image
+                    )
+                    return { image, success }
+                })
+            )
+
+            // 收集成功删除的图片
+            for (const result of results) {
+                if (
+                    result.status === 'fulfilled' &&
+                    result.value.success
+                ) {
+                    const image = result.value.image
+                    deletedImages.add(image)
+
+                    // 检查是否有关键字需要移除
+                    const featureCode = `${openedGroup.value}/${image}`
+                    if (featureCodes.value.includes(featureCode)) {
+                        if (utools.removeFeature(featureCode)) {
+                            deletedFeatureCodes.add(featureCode)
+                        }
+                    }
+                }
+            }
+
+            // 让出主线程，避免卡顿
+            if (i + BATCH_SIZE < toDelete.length) {
+                await new Promise(resolve => setTimeout(resolve, 0))
+            }
+        }
+
+        // 一次性更新响应式数据
+        if (deletedImages.size > 0) {
+            imageList.value = imageList.value.filter(
+                image => !deletedImages.has(image)
+            )
+        }
+
+        if (deletedFeatureCodes.size > 0) {
+            featureCodes.value = featureCodes.value.filter(
+                code => !deletedFeatureCodes.has(code)
+            )
+        }
+
+        // 保存配置
+        saveImageProfile()
+
+        // 清理已删除图片的选中状态
+        if (deletedImages.size > 0) {
+            selectedImages.value = selectedImages.value.filter(
+                image => !deletedImages.has(image)
+            )
+            updateAllSelectedState()
+        }
+
+        loading.value = false
+
+        // 显示结果
+        const successCount = deletedImages.size
+        const totalCount = toDelete.length
+        if (successCount === totalCount) {
+            ElMessage.success({
+                message: '删除成功',
+                showClose: true
+            })
+        } else if (successCount === 0) {
+            ElMessage.warning({
+                message: '删除失败',
+                showClose: true
+            })
+        } else {
+            ElMessage.info({
+                message: `删除成功 ${successCount} 张，失败 ${totalCount - successCount} 张`,
+                showClose: true
+            })
+        }
+    })
 }
 
 const showImageContextMenu = (event: MouseEvent, image: string, index: number, filter?: boolean) => {
@@ -691,7 +1160,7 @@ const handleGroupAddBtnClick = () => {
 }
 
 const handleGroupInput = (val: string) => {
-    const pattern = /[\\/:*?"<>|]/g
+    const pattern = getInvalidCharsPattern()
     if (pattern.test(val)) {
         tipsVisible.value = true
         groupName.value = val.replace(pattern, '')
@@ -700,8 +1169,33 @@ const handleGroupInput = (val: string) => {
     }
 }
 
+// 获取当前系统的非法字符正则
+const getInvalidCharsPattern = (): RegExp => {
+    if (utools.isWindows()) {
+        // Windows: \ / : * ? " < > |
+        return /[\\/:*?"<>|]/g
+    } else if (utools.isMacOS()) {
+        // macOS: / 和 :
+        return /[/:]/g
+    } else {
+        // Linux: /
+        return /\//g
+    }
+}
+
+// 获取当前系统的非法字符提示
+const getInvalidCharsTip = (): string => {
+    if (utools.isWindows()) {
+        return '名称不能包含 \\ / : * ? " < > | 等字符'
+    } else if (utools.isMacOS()) {
+        return '名称不能包含 / 或 : 字符'
+    } else {
+        return '名称不能包含 / 字符'
+    }
+}
+
 const handleImageInput = (val: string) => {
-    const pattern = /[\\/:*?"<>|]/g
+    const pattern = getInvalidCharsPattern()
     if (pattern.test(val)) {
         tipsVisible.value = true
         imageName.value = val.replace(pattern, '')
@@ -711,7 +1205,7 @@ const handleImageInput = (val: string) => {
 }
 
 const handleBatchImageInput = (val: string, image: {name: string, extension: string, tipsVisible: boolean}) => {
-    const pattern = /[\\/:*?"<>|]/g
+    const pattern = getInvalidCharsPattern()
     if (pattern.test(val)) {
         image.tipsVisible = true
         image.name = val.replace(pattern, '')
@@ -721,64 +1215,272 @@ const handleBatchImageInput = (val: string, image: {name: string, extension: str
 }
 
 const handleImageBatchEditConfirmBtnClick = async () => {
+    // 1. 预处理：去除空格
     batchEditImages.value.forEach(image => {
         image.name = image.name.trim()
     })
-    imageList.value.map(image => {
-        let index = selectedImages.value.indexOf(image)
-        if (index !== -1) {
-            return batchEditImages.value[index]
+
+    // 2. 验证所有文件名
+    const errors: string[] = []
+    const newNames: string[] = []
+
+    const allOriginalNames = batchEditImages.value.map(img => img.originalName)
+
+    for (let i = 0; i < batchEditImages.value.length; i++) {
+        const { originalName, name, extension } = batchEditImages.value[i]
+        const newFileName = `${name}${extension}`
+
+        // 验证文件名合法性
+        const validation = window.p.validateFileName(newFileName)
+        if (!validation.valid) {
+            errors.push(`「${originalName}」: ${validation.error}`)
+            continue
         }
-    })
-    await batchOperateHandler((image, index) => {
-        console.log(`${image} to ${batchEditImages.value[index].name + batchEditImages.value[index].extension }`)
-        return true
-    }, {allInOne: false})
-    // imageBatchEditDialogVisible.value = false
+
+        // 检查新名称是否与其他待修改的名称重复
+        if (newNames.includes(newFileName)) {
+            errors.push(`「${originalName}」: 新名称与其他图片重复`)
+            continue
+        }
+
+        // 检查新名称是否与现有图片重复（排除自身和其他待修改的图片）
+        const existingIndex = imageList.value.indexOf(newFileName)
+        if (existingIndex !== -1 && !allOriginalNames.includes(newFileName)) {
+            errors.push(`「${originalName}」: 新名称与现有图片重复`)
+            continue
+        }
+
+        newNames.push(newFileName)
+    }
+
+    // 如果有验证错误，显示错误信息
+    if (errors.length > 0) {
+        ElMessage.warning({
+            message: `验证失败：${errors[0]}${errors.length > 1 ? ` 等 ${errors.length} 个错误` : ''}`,
+            showClose: true
+        })
+        return
+    }
+
+    // 3. 构建重命名任务列表（只包含名称有变化的）
+    const renameTasks: {
+        originalImage: string
+        newImage: string
+        index: number
+    }[] = []
+
+    for (let i = 0; i < batchEditImages.value.length; i++) {
+        const { originalName, name, extension } = batchEditImages.value[i]
+        const newImage = `${name}${extension}`
+
+        if (originalName !== newImage) {
+            // 找到在 imageList 中的索引
+            const imageListIndex = imageList.value.indexOf(originalName)
+            if (imageListIndex !== -1) {
+                renameTasks.push({
+                    originalImage: originalName,
+                    newImage,
+                    index: imageListIndex
+                })
+            }
+        }
+    }
+
+    // 如果没有需要修改的，直接关闭
+    if (renameTasks.length === 0) {
+        imageBatchEditDialogVisible.value = false
+        ElMessage.info({
+            message: '没有需要修改的图片',
+            showClose: true
+        })
+        return
+    }
+
+    // 4. 分批并发执行重命名
+    // 验证阶段已确保所有重命名操作互不冲突，可以安全并发
+    loading.value = true
+
+    const successResults: {
+        originalImage: string
+        newImage: string
+        index: number
+    }[] = []
+    const failedResults: { originalImage: string; error: string }[] = []
+    const updatedFeatureCodes: {
+        oldCode: string
+        newCode: string
+        index: number
+    }[] = []
+
+    const BATCH_SIZE = 20 // 每批并发 20 个
+
+    for (let i = 0; i < renameTasks.length; i += BATCH_SIZE) {
+        const batch = renameTasks.slice(i, i + BATCH_SIZE)
+
+        // 并发执行这一批重命名
+        const results = await Promise.allSettled(
+            batch.map(async task => {
+                const result = await window.p.renameImage(
+                    openedGroup.value,
+                    task.originalImage,
+                    task.newImage
+                )
+                return { task, result }
+            })
+        )
+
+        // 处理结果
+        for (const promiseResult of results) {
+            if (promiseResult.status === 'fulfilled') {
+                const { task, result } = promiseResult.value
+
+                if (result.success) {
+                    successResults.push(task)
+
+                    // 检查是否有关键字需要更新
+                    const oldFeatureCode = `${openedGroup.value}/${task.originalImage}`
+                    const featureIndex = featureCodes.value.indexOf(oldFeatureCode)
+                    if (featureIndex !== -1) {
+                        const newFeatureCode = `${openedGroup.value}/${task.newImage}`
+                        if (utools.removeFeature(oldFeatureCode)) {
+                            if (
+                                utools.setFeature({
+                                    code: newFeatureCode,
+                                    explain: task.newImage,
+                                    platform: ['win32', 'darwin', 'linux'],
+                                    cmds: [task.newImage]
+                                })
+                            ) {
+                                updatedFeatureCodes.push({
+                                    oldCode: oldFeatureCode,
+                                    newCode: newFeatureCode,
+                                    index: featureIndex
+                                })
+                            }
+                        }
+                    }
+                } else {
+                    failedResults.push({
+                        originalImage: task.originalImage,
+                        error: result.error || '未知错误'
+                    })
+                }
+            } else {
+                // Promise rejected（不太可能发生）
+                const task = batch[results.indexOf(promiseResult)]
+                failedResults.push({
+                    originalImage: task.originalImage,
+                    error: '操作异常'
+                })
+            }
+        }
+
+        // 让出主线程，避免卡顿
+        if (i + BATCH_SIZE < renameTasks.length) {
+            await new Promise(resolve => setTimeout(resolve, 0))
+        }
+    }
+
+    // 5. 一次性更新响应式数据
+    if (successResults.length > 0) {
+        // 更新 imageList
+        for (const { index, newImage } of successResults) {
+            imageList.value[index] = newImage
+        }
+
+        // 更新 featureCodes
+        for (const { index, newCode } of updatedFeatureCodes) {
+            featureCodes.value[index] = newCode
+        }
+
+        // 更新 selectedImages 中的图片名称
+        const renameMap = new Map(successResults.map(r => [r.originalImage, r.newImage]))
+        selectedImages.value = selectedImages.value.map(image => 
+            renameMap.get(image) || image
+        )
+
+        // 保存配置
+        saveImageProfile()
+
+        // 重新观察图片（因为名称变化导致 DOM 更新）
+        observeImages()
+    }
+
+    loading.value = false
+    imageBatchEditDialogVisible.value = false
+
+    // 6. 显示结果
+    const totalCount = renameTasks.length
+    const successCount = successResults.length
+
+    if (successCount === totalCount) {
+        ElMessage.success({
+            message: `成功修改 ${successCount} 张图片名称`,
+            showClose: true
+        })
+    } else if (successCount === 0) {
+        ElMessage.warning({
+            message: `修改失败：${failedResults[0].error}`,
+            showClose: true
+        })
+    } else {
+        ElMessage.info({
+            message: `成功 ${successCount} 张，失败 ${failedResults.length} 张`,
+            showClose: true
+        })
+    }
 }
 
 const getImagePath = (image: string) => {
     return window.p.getImagePath(openedGroup.value, image)
 }
 
-const handleImageLoad = (index: number) => {
-    if (scrollToImageIndex !== -1) {
-        imageLoadList[index] = true
-        let arePreviousImagesLoaded = true
-        for (let i = 0; i < scrollToImageIndex; i++) {
-            if (!imageLoadList[i]) {
-                arePreviousImagesLoaded = false
-                break
-            }
-        }
-        if (arePreviousImagesLoaded) {
-            document.querySelector(`.image-item:nth-child(${scrollToImageIndex + 1})`).scrollIntoView()
-            scrollToImageIndex = -1
-            imageLoadList.length = 0
-        }
-    }
-}
-
-const handleImageDialogConfirmBtnClick = () => {
+const handleImageDialogConfirmBtnClick = async () => {
     imageName.value = imageName.value.trim()
-    let message = ''
-    if (!imageName.value) {
-        message = '修改失败，图片名称不能为空'
-    } else if (imageName.value.length > 100) {
-        message = '修改失败，图片名称不能超过100个字符'
-    } else if (![-1, imageIndex.value].includes(imageList.value.indexOf(`${imageName.value}${imageExtension.value}`))) {
-        message = '修改失败，图片名称重复'
-    }
-    if (message) {
+    const newImage = `${imageName.value}${imageExtension.value}`
+    
+    // 使用后端验证函数检查文件名合法性
+    const validation = window.p.validateFileName(newImage)
+    if (!validation.valid) {
         ElMessage.warning({
-            message,
+            message: `修改失败，${validation.error}`,
             showClose: true
         })
         return
     }
+    
+    // 检查名称是否重复（排除当前图片自身）
+    const existingIndex = imageList.value.indexOf(newImage)
+    if (existingIndex !== -1 && existingIndex !== imageIndex.value) {
+        ElMessage.warning({
+            message: '修改失败，图片名称重复',
+            showClose: true
+        })
+        return
+    }
+    
     const originalImage = imageList.value[imageIndex.value]
-    const newImage = `${imageName.value}${imageExtension.value}`
-    window.p.renameImage(openedGroup.value, originalImage, newImage)
+    
+    // 如果名称没有变化，直接关闭对话框
+    if (originalImage === newImage) {
+        imageDialogVisible.value = false
+        return
+    }
+    
+    // 执行重命名操作
+    loading.value = true
+    const result = await window.p.renameImage(openedGroup.value, originalImage, newImage)
+    loading.value = false
+    
+    if (!result.success) {
+        ElMessage.warning({
+            message: `修改失败，${result.error}`,
+            showClose: true
+        })
+        return
+    }
+    
+    // 更新关键字（如果有）
     const featureCode = `${openedGroup.value}/${originalImage}`
     const index = featureCodes.value.indexOf(featureCode)
     if (index !== -1) {
@@ -792,13 +1494,23 @@ const handleImageDialogConfirmBtnClick = () => {
         })
         featureCodes.value[index] = newFeatureCode
         ElMessage.success({
-            message: '由于名称变化，关键字已更新',
+            message: '修改成功，关键字已同步更新',
+            showClose: true
+        })
+    } else {
+        ElMessage.success({
+            message: '修改成功',
             showClose: true
         })
     }
+    
+    // 更新 UI
     imageList.value[imageIndex.value] = newImage
     saveImageProfile()
     imageDialogVisible.value = false
+    
+    // 重新观察图片元素（因为 Vue 会重新渲染，新元素需要被观察）
+    observeImages()
 }
 
 const handleFolderOpenBtnClick = () => {
@@ -864,15 +1576,42 @@ const saveImageProfile = () => {
 }
 
 const handleDrop = (event: DragEvent) => {
-  if (event.dataTransfer?.files?.length) {
-    const images = [...event.dataTransfer.files].filter((file: File) => supportImageMIME.includes(file.type))
-    if (images && images.length) {
-      saveImageHandler((path) => window.p.copyImage(path, openedGroup.value), images.map((image: File) => image.path))
+    // 阻止默认行为（防止浏览器打开文件）
+    event.preventDefault()
+    
+    // 检查是否有文件
+    if (!event.dataTransfer?.files?.length) {
+        return
     }
-  }
+    
+    // 过滤出图片文件（使用 MIME 类型）
+    const imageFiles = [...event.dataTransfer.files].filter((file: File) => 
+        supportImageMIME.includes(file.type)
+    )
+    
+    // 如果没有图片，给出提示
+    if (imageFiles.length === 0) {
+        ElMessage.warning({
+            message: '未检测到图片文件，或图片格式不支持',
+            showClose: true
+        })
+        return
+    }
+    
+    // 提取文件路径（Electron 环境中 File 对象有 path 属性）
+    const filePaths = imageFiles.map((file: any) => file.path)
+    
+    // 批量上传（使用 copyImage，已优化为原子操作）
+    saveImageHandler(
+        (path) => window.p.copyImage(path, openedGroup.value), 
+        filePaths
+    )
 }
 
-onMounted(() => {
+onMounted(async () => {
+    // 初始化图片懒加载观察器
+    initImageObserver()
+    
     const features = utools.getFeatures()
     featureCodes.value = features.map((feature: any) => feature.code)
 
@@ -900,7 +1639,7 @@ onMounted(() => {
                         ? lastOpenedGroup : groupList.value[0])
             }
         } else {
-            handleGroupChange(group)
+            await handleGroupChange(group)
             const index = imageList.value.indexOf(image)
             if (index === -1) {
                 ElMessage.warning({
@@ -908,18 +1647,27 @@ onMounted(() => {
                     showClose: true
                 })
             } else {
-                fullscreenImage.value = image
-                fullscreenVisible.value = true
-                scrollToImageIndex = index
+                // 边界检查：确保索引有效
+                if (index >= 0 && index < imageList.value.length) {
+                    fullscreenImage.value = image
+                    fullscreenVisible.value = true
+                }
             }
         }
     }
 
     utools.setSubInput(({text}: any) => {
         search.value = text
-    })
+    }, '在当前分组中搜索图片')
 })
 
+// 组件卸载时清理 Observer
+onUnmounted(() => {
+    if (imageObserver) {
+        imageObserver.disconnect()
+        imageObserver = null
+    }
+})
 
 </script>
 
@@ -955,8 +1703,8 @@ onMounted(() => {
                     <el-popover
                             :visible="tipsVisible"
                             placement="bottom"
-                            :width="260"
-                            content='名称不能包含\/:*?"<>|中的任何字符'
+                            :width="280"
+                            :content="getInvalidCharsTip()"
                     >
                         <template #reference>
                             <el-input ref="groupInputRef"
@@ -1035,19 +1783,27 @@ onMounted(() => {
                         </div>
                         <el-divider direction="vertical" style="border-color: #999999"/>
                         <div style="color: #757575">
-                            共{{ imageList.length }}张图片
+                            <template v-if="search">
+                                搜索到{{ filteredImageList.length }}张图片 / 共{{ imageList.length }}张
+                            </template>
+                            <template v-else>
+                                共{{ imageList.length }}张图片
+                            </template>
                         </div>
                     </div>
                 </div>
                 <div v-if="imageList.length" class="image-list" @drop="handleDrop" @dragover.prevent>
+                    <div v-if="filteredImageList.length === 0" style="width: 100%; text-align: center; padding: 40px 0; color: #909399;">
+                        未找到匹配的图片
+                    </div>
                     <div class="image-item"
                          :style="{width: `calc((100% - ${(imageNumPerRow-1)*20}px) / ${imageNumPerRow})`}"
-                         v-for="(image,index) in imageList" :key="image">
+                         v-for="image in filteredImageList" :key="image">
                         <div class="header image-item-header">
                             <div class="image-item-header-left" :title="image">{{ image }}</div>
                             <div class="image-item-header-right">
                                 <div v-if="imageNumPerRow===1" class="header-btn square" title="修改图片名称"
-                                     @click="handleImageEditBtnClick(image, index)">
+                                     @click="handleImageEditBtnClick(image, imageList.indexOf(image))">
                                     <SvgIcon name="edit"></SvgIcon>
                                 </div>
                                 <div class="header-btn square"
@@ -1083,19 +1839,22 @@ onMounted(() => {
                                     <SvgIcon name="image"></SvgIcon>
                                 </div>
                                 <div v-if="imageNumPerRow===1" class="header-btn square" title="删除图片"
-                                     @click="handleImageRemoveBtnClick(image, index)">
+                                     @click="handleImageRemoveBtnClick(image, imageList.indexOf(image))">
                                     <SvgIcon name="delete"></SvgIcon>
                                 </div>
                                 <div v-if="imageNumPerRow>=2" class="header-btn square" title="更多"
-                                     @click="showImageContextMenu($event, image, index, true)">
+                                     @click="showImageContextMenu($event, image, imageList.indexOf(image), true)">
                                     <SvgIcon name="more"></SvgIcon>
                                 </div>
                             </div>
                         </div>
                         <div class="image-item-body">
-                            <img style="max-width: 100%" :src="getImagePath(image)" :title="image"
-                                 @contextmenu="showImageContextMenu($event, image, index)"
-                                 @load="handleImageLoad(index)">
+                            <img class="lazy-image" 
+                                 style="max-width: 100%" 
+                                 src=""
+                                 :data-src="getImagePath(image)" 
+                                 :title="image"
+                                 @contextmenu="showImageContextMenu($event, image, imageList.indexOf(image))">
                         </div>
                     </div>
                 </div>
@@ -1138,8 +1897,8 @@ onMounted(() => {
             <el-popover
                     :visible="tipsVisible"
                     placement="bottom"
-                    :width="260"
-                    content='名称不能包含\/:*?"<>|中的任何字符'
+                    :width="280"
+                    :content="getInvalidCharsTip()"
             >
                 <template #reference>
                     <el-input ref="imageInputRef"
@@ -1224,75 +1983,120 @@ onMounted(() => {
                 style="margin-bottom: 0"
                 width="60%"
                 :z-index="99"
+                @close="selectedImages = []; allSelected = false"
         >
-            <!-- <el-button style="margin: 0 8px 8px 0" color="#626aef" @click="handleImageBatchEditBtnClick">修改图片名称
-            </el-button> -->
-            <el-button style="margin: 0 8px 8px 0" color="#626aef" @click="handleKeywordBatchSetBtnClick">设为utools关键字
+            <el-button style="margin: 0 8px 8px 0; height: 28px;" color="#626aef" @click="handleImageBatchEditBtnClick">修改图片名称
             </el-button>
-            <el-button style="margin: 0 8px 8px 0" color="#626aef" @click="handleKeywordBatchRemoveBtnClick">移除utools关键字
+            <el-button style="margin: 0 8px 8px 0; height: 28px;" color="#626aef" @click="handleKeywordBatchSetBtnClick">设为utools关键字
             </el-button>
-            <el-button style="margin: 0 8px 8px 0" color="#626aef" @click="handleImageFileBatchCopyBtnClick">
+            <el-button style="margin: 0 8px 8px 0; height: 28px;" color="#626aef" @click="handleKeywordBatchRemoveBtnClick">移除utools关键字
+            </el-button>
+            <el-button style="margin: 0 8px 8px 0; height: 28px;" color="#626aef" @click="handleImageFileBatchCopyBtnClick">
                 复制图片文件
             </el-button>
-            <el-button style="margin: 0 8px 8px 0" color="#626aef" @click="handleImageFileBatchPasteBtnClick">粘贴图片文件
+            <el-button style="margin: 0 8px 8px 0; height: 28px;" color="#626aef" @click="handleImageFileBatchPasteBtnClick">粘贴图片文件
             </el-button>
-            <el-button style="margin: 0 8px 8px 0" type="danger" @click="handleImageBatchRemoveBtnClick">删除
+            <el-button style="margin: 0 8px 8px 0; height: 28px;" type="danger" @click="handleImageBatchRemoveBtnClick">删除
             </el-button>
-            <el-table :data="imageList" max-height="calc(80vh - 152px)"
-                      @selection-change="(rows: string[]) => selectedImages = rows">
-                <el-table-column type="selection" width="38"></el-table-column>
-                <el-table-column width="48">
-                    <template #default="{row}">
-                        <div style="display: flex; align-items: center"
-                             :title="featureCodes.includes(`${openedGroup}/${row}`) ? '已设为关键字' : '未设为关键字'">
-                            <SvgIcon
-                                    :name="featureCodes.includes(`${openedGroup}/${row}`) ? 'star-fill' : 'star'"></SvgIcon>
+            <div v-if="search" style="margin-bottom: 8px; color: #909399; font-size: 14px;">
+                当前搜索：<span style="color: #303133; font-weight: 500;">{{ search }}</span>，仅显示匹配的 {{ filteredImageList.length }} 张图片
+            </div>
+            
+            <!-- 虚拟列表容器 -->
+            <div class="batch-list-container">
+                <!-- 表头 -->
+                <div class="batch-list-header">
+                    <div class="batch-list-cell" style="width: 30px; padding-left: 12px;">
+                        <input 
+                            type="checkbox" 
+                            :checked="allSelected"
+                            @change="toggleAllSelection"
+                            style="cursor: pointer; width: 16px; height: 16px;"
+                        />
+                    </div>
+                    <div class="batch-list-cell" style="width: 34px;"></div>
+                    <div class="batch-list-cell" style="width: 34px;"></div>
+                    <div class="batch-list-cell batch-list-cell-content" style="flex: 1; min-width: 0;">图片名称</div>
+                </div>
+                
+                <!-- 虚拟滚动列表 -->
+                <RecycleScroller
+                    class="batch-scroller"
+                    :items="virtualListItems"
+                    :item-size="40"
+                    key-field="id"
+                >
+                    <template #default="{ item }">
+                        <div class="batch-list-row" :class="{ 'selected': isImageSelected(item.name) }">
+                            <div class="batch-list-cell" style="width: 30px; padding-left: 12px;">
+                                <input 
+                                    type="checkbox" 
+                                    :checked="isImageSelected(item.name)"
+                                    @change="toggleImageSelection(item.name)"
+                                    style="cursor: pointer; width: 16px; height: 16px;"
+                                />
+                            </div>
+                            <div class="batch-list-cell" style="width: 34px;">
+                                <div style="display: flex; align-items: center"
+                                     :title="featureCodes.includes(`${openedGroup}/${item.name}`) ? '已设为关键字' : '未设为关键字'">
+                                    <SvgIcon :name="featureCodes.includes(`${openedGroup}/${item.name}`) ? 'star-fill' : 'star'"></SvgIcon>
+                                </div>
+                            </div>
+                            <div class="batch-list-cell" style="width: 34px;">
+                                <el-popover :popper-style="{width: 'auto', minWidth: 0, padding: 0}" placement="right">
+                                    <template #reference>
+                                        <div style="display: flex; align-items: center; cursor: pointer">
+                                            <SvgIcon name="view"></SvgIcon>
+                                        </div>
+                                    </template>
+                                    <img :src="getImagePath(item.name)" style="max-width: 300px; display: block">
+                                </el-popover>
+                            </div>
+                            <div class="batch-list-cell batch-list-cell-content" style="flex: 1; min-width: 0;" :title="item.name">
+                                {{ item.name }}
+                            </div>
                         </div>
                     </template>
-                </el-table-column>
-                <el-table-column width="48">
-                    <template #default="{row}">
-                        <el-popover :popper-style="{width: 'auto', minWidth: 0, padding: 0}"
-                                    placement="right">
-                            <template #reference>
-                                <div style="display: flex; align-items: center; cursor: pointer">
-                                    <SvgIcon name="view"></SvgIcon>
-                                </div>
-                            </template>
-                            <img :src="getImagePath(row)" style="max-width: 300px; display: block">
-                        </el-popover>
-                    </template>
-                </el-table-column>
-                <el-table-column label="图片名称">
-                    <template #default="{row}">{{ row }}</template>
-                </el-table-column>
-            </el-table>
+                </RecycleScroller>
+            </div>
         </el-dialog>
         <el-dialog
             v-model="imageBatchEditDialogVisible"
             title="批量修改图片名称"
-            width="400"
+            width="500"
         >
-            <el-scrollbar max-height="calc(70vh - 120px)">
-                <div v-for="(image,index) in batchEditImages" :key="index" style="margin-top: 6px">
-                    <el-popover
-                        :visible="image.tipsVisible"
-                        placement="bottom"
-                        :width="260"
-                        content='名称不能包含\/:*?"<>|中的任何字符'
-                    >
-                        <template #reference>
-                            <el-input
-                                v-model="image.name"
-                                placeholder="输入图片名称"
-                                @input="val => {handleBatchImageInput(val, image)}"
-                                @blur="image.tipsVisible=false">
-                                <template #append>{{ image.extension }}</template>
-                            </el-input>
-                        </template>
-                    </el-popover>
-                </div>
-            </el-scrollbar>
+            <!-- 虚拟列表容器 -->
+            <div class="batch-edit-container">
+                <RecycleScroller
+                    class="batch-edit-scroller"
+                    :items="batchEditImages"
+                    :item-size="42"
+                    key-field="id"
+                >
+                    <template #default="{ item }">
+                        <div class="batch-edit-item">
+                            <el-popover
+                                :visible="item.tipsVisible"
+                                placement="bottom"
+                                :width="280"
+                                :content="getInvalidCharsTip()"
+                            >
+                                <template #reference>
+                                    <el-input
+                                        v-model="item.name"
+                                        placeholder="输入图片名称"
+                                        @input="(val: string) => {handleBatchImageInput(val, item)}"
+                                        @blur="item.tipsVisible=false"
+                                        size="default"
+                                    >
+                                        <template #append>{{ item.extension }}</template>
+                                    </el-input>
+                                </template>
+                            </el-popover>
+                        </div>
+                    </template>
+                </RecycleScroller>
+            </div>
             <template #footer>
                 <div class="dialog-footer">
                     <el-button @click="imageBatchEditDialogVisible = false">取消</el-button>
@@ -1354,6 +2158,10 @@ onMounted(() => {
     width: 35px;
     height: 35px;
     cursor: pointer;
+}
+.image-item-header .header-btn {
+    width: 32px;
+    height: 32px;
 }
 
 .header-btn:hover {
@@ -1481,5 +2289,76 @@ onMounted(() => {
 
 .ghost {
     border-bottom: 2px solid #597ef7;
+}
+
+/* 批量操作虚拟列表样式 */
+.batch-list-container {
+    border: 1px solid #e4e7ed;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.batch-list-header {
+    display: flex;
+    align-items: center;
+    height: 40px;
+    background-color: #f5f7fa;
+    border-bottom: 1px solid #e4e7ed;
+    font-weight: 500;
+    color: #606266;
+    font-size: 14px;
+}
+
+.batch-list-cell {
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+}
+
+.batch-list-cell-content {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+}
+
+.batch-scroller {
+    height: calc(80vh - 200px);
+    background-color: white;
+}
+
+.batch-list-row {
+    display: flex;
+    align-items: center;
+    height: 40px;
+    border-bottom: 1px solid #f0f0f0;
+    transition: background-color 0.2s;
+    font-size: 14px;
+    color: #606266;
+}
+
+.batch-list-row:hover {
+    background-color: #f5f7fa;
+}
+
+.batch-list-row.selected {
+    background-color: #ecf5ff;
+}
+
+/* 批量编辑图片名称虚拟列表样式 */
+.batch-edit-container {
+    border: 1px solid #e4e7ed;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.batch-edit-scroller {
+    height: calc(70vh - 180px);
+    background-color: white;
+    padding: 8px;
+}
+
+.batch-edit-item {
+    margin-bottom: 8px;
 }
 </style>
